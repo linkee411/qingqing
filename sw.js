@@ -3,7 +3,7 @@
  *       静态资源 stale-while-revalidate
  * 发布新版本时把 VERSION 加一即可让旧缓存自动清理。
  */
-const VERSION = 'v2';
+const VERSION = 'v3';
 const CACHE = 'qingqian-' + VERSION;
 const ASSETS = [
   './',
@@ -39,7 +39,7 @@ self.addEventListener('fetch', (e) => {
   // 页面导航：先要网络上的新版本，失败再退回缓存
   if (req.mode === 'navigate') {
     e.respondWith(
-      fetch(req)
+      fetch(new Request(req.url, { cache: 'reload' }))
         .then((res) => {
           const copy = res.clone();
           caches.open(CACHE).then((c) => c.put('./index.html', copy));
