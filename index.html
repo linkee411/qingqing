@@ -979,7 +979,7 @@ function viewMe(){
     +'<button data-act="toggleTheme"><i class="ic">'+svi('moon')+'</i><b>深色模式</b><span class="sw '+(S.theme==='dark'?'on':'')+'" id="swTheme"></span></button>'
     +'<button data-act="reset" class="danger"><i class="ic">'+svi('trash')+'</i><b class="danger">清空所有数据</b><span class="ar">›</span></button>'
     +'</div>';
-  h+='<div class="about">青钱 v3.5 · 数据只存在你自己的设备上<br>建议每月导出一次备份</div>';
+  h+='<div class="about">青钱 v3.6 · 数据只存在你自己的设备上<br>建议每月导出一次备份</div>';
   return h;
 }
 
@@ -1234,7 +1234,7 @@ function parseBill(txt){
     if(hasTime&&hasAmt){hi=i;cells=c;break;}
   }
   if(hi<0)return null;
-  var idx={time:-1,kind:-1,amt:-1,peer:-1,goods:-1,tcat:-1,note:-1,pay:-1};
+  var idx={time:-1,kind:-1,amt:-1,peer:-1,goods:-1,tcat:-1,note:-1,pay:-1,status:-1};
   cells.forEach(function(h,k){
     var s=h.replace(/\s/g,'');
     if(idx.time<0&&s.indexOf('交易时间')>=0)idx.time=k;
@@ -1245,6 +1245,7 @@ function parseBill(txt){
     else if(idx.tcat<0&&s.indexOf('交易分类')>=0)idx.tcat=k;
     else if(idx.note<0&&s.indexOf('备注')>=0)idx.note=k;
     else if(idx.pay<0&&(s.indexOf('支付方式')>=0||s.indexOf('付款方式')>=0))idx.pay=k;
+    else if(idx.status<0&&(s.indexOf('当前状态')>=0||s.indexOf('交易状态')>=0||s==='状态'))idx.status=k;
   });
   if(idx.time<0||idx.amt<0||idx.kind<0)return null;
   var rows=[],dup=0,skip=0,seen={};
@@ -1254,6 +1255,11 @@ function parseBill(txt){
     var ln=lines[k];
     if(!ln||ln.indexOf(',')<0)continue;
     var cc=parseCSVLine(ln);
+    // 金额里带千分位逗号（¥1,299.00）又没加引号时，会被拆成多列 —— 这里把它拼回去
+    if(idx.amt>=0&&cc.length>cells.length){
+      var extra=cc.length-cells.length;
+      cc=cc.slice(0,idx.amt).concat([cc.slice(idx.amt,idx.amt+extra+1).join(',')],cc.slice(idx.amt+extra+1));
+    }
     var time=(cc[idx.time]||'').trim();
     var m=time.match(/(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
     if(!m){skip++;continue;}
@@ -1264,6 +1270,9 @@ function parseBill(txt){
     if(!type){skip++;continue;}
     var amount=parseFloat((cc[idx.amt]||'').replace(/[¥￥,\s]/g,''));
     if(!(amount>0)){skip++;continue;}
+    // 退款/关闭/失败的支出行不算真花出去的（微信「已全额退款」、支付宝「交易关闭」）
+    var status=idx.status>=0?((cc[idx.status]||'').trim()):'';
+    if(type==='expense'&&/退款|关闭|失败|撤销/.test(status)){skip++;continue;}
     var peer=(idx.peer>=0?(cc[idx.peer]||''):'').trim();
     var goods=(idx.goods>=0?(cc[idx.goods]||''):'').trim();
     var tcat=(idx.tcat>=0?(cc[idx.tcat]||''):'').trim();
