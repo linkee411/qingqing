@@ -3,7 +3,7 @@
  *       静态资源 stale-while-revalidate
  * 发布新版本时把 VERSION 加一即可让旧缓存自动清理。
  */
-const VERSION = 'v8';
+const VERSION = 'v9';
 const CACHE = 'qingqian-' + VERSION;
 const ASSETS = [
   './',
