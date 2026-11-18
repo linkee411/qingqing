@@ -323,6 +323,10 @@ html[data-theme="dark"] .banner.warn{background:#3a2c12;color:#ffc272}
   opacity:0;pointer-events:none;transition:all .25s;white-space:nowrap;max-width:80vw
 }
 .toast.on{opacity:1;transform:translate(-50%,0)}
+.dbg{background:var(--chip);border-radius:14px;padding:12px 13px;margin-top:10px}
+.dbg .dgl{font-size:12px;line-height:1.55;color:var(--mut);word-break:break-all}
+.dbg .dgl+.dgl{margin-top:8px;padding-top:8px;border-top:1px solid rgba(0,0,0,.06)}
+.dbg .dgl b{color:var(--fg);font-weight:650;font-size:11.5px}
 .toast .act{color:#8bf3e0;font-weight:800;margin-left:14px;cursor:pointer;
   pointer-events:auto;padding:6px 4px;display:inline-block}
 
@@ -979,7 +983,7 @@ function viewMe(){
     +'<button data-act="toggleTheme"><i class="ic">'+svi('moon')+'</i><b>深色模式</b><span class="sw '+(S.theme==='dark'?'on':'')+'" id="swTheme"></span></button>'
     +'<button data-act="reset" class="danger"><i class="ic">'+svi('trash')+'</i><b class="danger">清空所有数据</b><span class="ar">›</span></button>'
     +'</div>';
-  h+='<div class="about">青钱 v3.7 · 数据只存在你自己的设备上<br>建议每月导出一次备份</div>';
+  h+='<div class="about">青钱 v3.8 · 数据只存在你自己的设备上<br>建议每月导出一次备份</div>';
   return h;
 }
 
@@ -1244,11 +1248,129 @@ function zipRead(buf,entry){
   var start=p+30+nlen+elen;
   return u8.subarray(start,start+entry.csize);
 }
+/* ---------- 纯 JS 的 deflate 解压（老浏览器没有 DecompressionStream 时兜底） ---------- */
+function qqInflate(src){
+  var pos=0,buf=0,cnt=0,out=new Uint8Array(Math.max(4096,src.length*5)),olen=0;
+  var LB=[3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+  var LE=[0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+  var DB=[1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+  var DE=[0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+  function need(n){
+    while(cnt<n){
+      if(pos>=src.length)throw new Error('压缩数据不完整');
+      buf|=src[pos++]<<cnt;cnt+=8;
+    }
+  }
+  function bits(n){
+    if(!n)return 0;
+    need(n);
+    var v=buf&((1<<n)-1);
+    buf>>>=n;cnt-=n;
+    return v;
+  }
+  function grow(n){
+    if(olen+n<=out.length)return;
+    var cap=out.length;
+    while(cap<olen+n)cap*=2;
+    var nb=new Uint8Array(cap);nb.set(out.subarray(0,olen));out=nb;
+  }
+  function huff(L){
+    var max=0,i;
+    for(i=0;i<L.length;i++)if(L[i]>max)max=L[i];
+    var count=new Int32Array(max+1);
+    for(i=0;i<L.length;i++)count[L[i]]++;
+    count[0]=0;
+    var first=new Int32Array(max+2),code=0;
+    for(i=1;i<=max;i++){code=(code+count[i-1])<<1;first[i]=code;}
+    var start=new Int32Array(max+2),acc=0;
+    for(i=1;i<=max;i++){start[i]=acc;acc+=count[i];}
+    var pos=Int32Array.from(start),syms=new Int32Array(acc);
+    for(i=0;i<L.length;i++)if(L[i])syms[pos[L[i]]++]=i;
+    return {max:max,count:count,first:first,start:start,syms:syms};
+  }
+  function dec(h){
+    var code=0,L,c;
+    for(L=1;L<=h.max;L++){
+      code=(code<<1)|bits(1);
+      c=h.count[L];
+      if(c){
+        var d=code-h.first[L];
+        if(d>=0&&d<c)return h.syms[h.start[L]+d];
+      }
+    }
+    throw new Error('霍夫曼解码失败');
+  }
+  var fixedL=null,fixedD=null;
+  function fixed(){
+    if(!fixedL){
+      var L=new Uint8Array(288),i;
+      for(i=0;i<288;i++)L[i]=i<144?8:(i<256?9:(i<280?7:8));
+      fixedL=huff(L);
+      var D=new Uint8Array(30);for(i=0;i<30;i++)D[i]=5;
+      fixedD=huff(D);
+    }
+    return [fixedL,fixedD];
+  }
+  var final=0;
+  while(!final){
+    final=bits(1);
+    var type=bits(2);
+    if(type===0){
+      var len=bits(16),nlen=bits(16);
+      if((len^nlen)!==0xFFFF)throw new Error('块长度校验失败');
+      grow(len);
+      for(var i=0;i<len;i++)out[olen++]=bits(8);
+    }else{
+      var lh,dh;
+      if(type===1){var f=fixed();lh=f[0];dh=f[1];}
+      else if(type===2){
+        var hlit=bits(5)+257,hdist=bits(5)+1,hclen=bits(4)+4;
+        var order=[16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+        var cl=new Uint8Array(19),n;
+        for(n=0;n<hclen;n++)cl[order[n]]=bits(3);
+        var clh=huff(cl);
+        var lens=new Uint8Array(hlit+hdist),p=0;
+        while(p<lens.length){
+          var s=dec(clh);
+          if(s<16){lens[p++]=s;continue;}
+          var rep,val;
+          if(s===16){
+            if(!p)throw new Error('重复码位置异常');
+            val=lens[p-1];rep=3+bits(2);
+          }else if(s===17){val=0;rep=3+bits(3);}
+          else{val=0;rep=11+bits(7);}
+          while(rep--&&p<lens.length)lens[p++]=val;
+        }
+        lh=huff(lens.subarray(0,hlit));
+        dh=huff(lens.subarray(hlit));
+      }else throw new Error('未知的压缩块类型');
+      for(;;){
+        var sym=dec(lh);
+        if(sym<256){grow(1);out[olen++]=sym;continue;}
+        if(sym===256)break;
+        sym-=257;
+        var length=LB[sym]+bits(LE[sym]);
+        var ds=dec(dh);
+        var dist=DB[ds]+bits(DE[ds]);
+        if(dist>olen)throw new Error('距离越界');
+        grow(length);
+        for(var k=0;k<length;k++,olen++)out[olen]=out[olen-dist];
+      }
+    }
+  }
+  return out.subarray(0,olen);
+}
+
 function inflateRaw(u8){
-  if(typeof DecompressionStream==='undefined')
-    return Promise.reject(new Error('这个浏览器不支持解压，请在电脑上把表格另存为 CSV 再导入'));
-  var s=new Blob([u8]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-  return new Response(s).arrayBuffer().then(function(b){return new Uint8Array(b);});
+  if(typeof DecompressionStream!=='undefined'){
+    try{
+      var st=new Blob([u8]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+      return new Response(st).arrayBuffer().then(function(b){return new Uint8Array(b);})
+        .catch(function(){return qqInflate(u8);});
+    }catch(e){}
+  }
+  try{return Promise.resolve(qqInflate(u8));}
+  catch(e){return Promise.reject(e);}
 }
 function xesc(s){
   return (s||'').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"')
@@ -1262,8 +1384,8 @@ function colIdx(ref){
 }
 function xlsxRows(buf){
   var dir=zipDir(buf);
-  var sheet=Object.keys(dir).filter(function(n){return /^xl\/worksheets\/sheet\d+\.xml$/.test(n);}).sort()[0];
-  if(!sheet)return Promise.reject(new Error('里面没有工作表'));
+  var sheets=Object.keys(dir).filter(function(n){return /^xl\/worksheets\/[^\/]+\.xml$/.test(n);});
+  if(!sheets.length)return Promise.reject(new Error('里面没有工作表'));
   var txt=function(name){
     var e=dir[name];
     if(!e)return Promise.resolve('');
@@ -1271,32 +1393,36 @@ function xlsxRows(buf){
     var body=e.method===0?Promise.resolve(raw):inflateRaw(raw);
     return body.then(function(u){return new TextDecoder('utf-8').decode(u);});
   };
-  return Promise.all([txt(sheet),txt('xl/sharedStrings.xml')]).then(function(a){
-    var xml=a[0],ss=a[1]||'',shared=[];
+  return Promise.all([Promise.all(sheets.map(txt)),txt('xl/sharedStrings.xml')]).then(function(a){
+    var xmls=a[0],ss=a[1]||'',shared=[];
     ss.replace(/<si>([\s\S]*?)<\/si>/g,function(_,inner){
       var t='';
       inner.replace(/<t[^>]*>([\s\S]*?)<\/t>/g,function(__,x){t+=x;return '';});
       shared.push(xesc(t));return '';
     });
-    var rows=[];
-    xml.replace(/<row[^>]*>([\s\S]*?)<\/row>/g,function(_,rc){
-      var cells=[],col=0;
-      rc.replace(/<c\b([^>]*)(?:\/>|>([\s\S]*?)<\/c>)/g,function(__,attrs,body){
-        attrs=attrs||'';body=body||'';
-        var ref=(attrs.match(/r="([A-Z]+\d+)"/)||[])[1];
-        var t=(attrs.match(/\bt="([^"]+)"/)||[])[1]||'';
-        var v=(body.match(/<v[^>]*>([\s\S]*?)<\/v>/)||[])[1];
-        var isT=(body.match(/<is>[\s\S]*?<t[^>]*>([\s\S]*?)<\/t>/)||[])[1];
-        var val='';
-        if(isT!=null)val=xesc(isT);
-        else if(v!=null)val=(t==='s')?(shared[+v]||''):(t==='str'?xesc(v):v);
-        if(ref)col=colIdx(ref);
-        cells[col]=val;col++;
-        return '';
+    var best=null;
+    xmls.forEach(function(xml){
+      var rows=[];
+      xml.replace(/<row[^>]*>([\s\S]*?)<\/row>/g,function(_,rc){
+        var cells=[],col=0;
+        rc.replace(/<c\b([^>]*)(?:\/>|>([\s\S]*?)<\/c>)/g,function(__,attrs,body){
+          attrs=attrs||'';body=body||'';
+          var ref=(attrs.match(/r="([A-Z]+\d+)"/)||[])[1];
+          var t=(attrs.match(/\bt="([^"]+)"/)||[])[1]||'';
+          var v=(body.match(/<v[^>]*>([\s\S]*?)<\/v>/)||[])[1];
+          var isT=(body.match(/<is>[\s\S]*?<t[^>]*>([\s\S]*?)<\/t>/)||[])[1];
+          var val='';
+          if(isT!=null)val=xesc(isT);
+          else if(v!=null)val=(t==='s')?(shared[+v]||''):(t==='str'?xesc(v):v);
+          if(ref)col=colIdx(ref);
+          cells[col]=val;col++;
+          return '';
+        });
+        rows.push(cells);return '';
       });
-      rows.push(cells);return '';
+      if(!best||rows.length>best.length)best=rows;
     });
-    return rows;
+    return best||[];
   });
 }
 function rowsToCsv(rows){
@@ -1317,75 +1443,149 @@ function excelDate(v){
 }
 
 function parseBill(txt){
-  var lines=txt.split(/\r?\n/),hi=-1,cells=null,i,j;
-  var src=/微信支付账单|微信昵称|微信支付/.test(txt)?'微信':(/支付宝交易记录|支付宝账户|支付宝/.test(txt)?'支付宝':'');
-  for(i=0;i<lines.length&&i<40;i++){
-    var c=parseCSVLine(lines[i]);
-    var hasTime=false,hasAmt=false;
+  var rows=[],ls=txt.split(/\r?\n/);
+  for(var i=0;i<ls.length;i++)rows.push(parseCSVLine(ls[i]));
+  return parseRows(rows,txt);
+}
+function parseRows(rows,rawTxt){
+  var txt=rawTxt||'';
+  var src=/微信支付账单|微信昵称|微信支付|WeChat Pay?/.test(txt)?'微信'
+        :(/支付宝交易记录|支付宝账户|支付宝|Alipay/.test(txt)?'支付宝':'');
+  var hi=-1,cells=null,i,j;
+  for(i=0;i<rows.length&&i<60;i++){
+    var c=rows[i]||[],hasTime=false,hasAmt=false,hasKind=false;
     for(j=0;j<c.length;j++){
-      if(c[j].indexOf('交易时间')>=0)hasTime=true;
-      if(c[j].indexOf('金额')>=0)hasAmt=true;
+      var v=String(c[j]||'');
+      if(v.indexOf('交易时间')>=0||v.indexOf('交易日期')>=0)hasTime=true;
+      if(v.indexOf('金额')>=0)hasAmt=true;
+      if(v.indexOf('收/支')>=0||v.indexOf('收支')>=0)hasKind=true;
     }
     if(hasTime&&hasAmt){hi=i;cells=c;break;}
   }
-  if(hi<0)return null;
   var idx={time:-1,kind:-1,amt:-1,peer:-1,goods:-1,tcat:-1,note:-1,pay:-1,status:-1};
-  cells.forEach(function(h,k){
-    var s=h.replace(/\s/g,'');
-    if(idx.time<0&&s.indexOf('交易时间')>=0)idx.time=k;
-    else if(idx.kind<0&&(s.indexOf('收/支')>=0||s==='收支'))idx.kind=k;
-    else if(idx.amt<0&&s.indexOf('金额')>=0)idx.amt=k;
-    else if(idx.peer<0&&s.indexOf('交易对方')>=0)idx.peer=k;
-    else if(idx.goods<0&&s.indexOf('商品')>=0)idx.goods=k;
-    else if(idx.tcat<0&&s.indexOf('交易分类')>=0)idx.tcat=k;
-    else if(idx.note<0&&s.indexOf('备注')>=0)idx.note=k;
-    else if(idx.pay<0&&(s.indexOf('支付方式')>=0||s.indexOf('付款方式')>=0))idx.pay=k;
-    else if(idx.status<0&&(s.indexOf('当前状态')>=0||s.indexOf('交易状态')>=0||s==='状态'))idx.status=k;
-  });
-  if(idx.time<0||idx.amt<0||idx.kind<0)return null;
-  var rows=[],dup=0,skip=0,seen={};
-  var exist={};
+  if(hi>=0){
+    cells.forEach(function(h,k){
+      var s=String(h||'').replace(/\s/g,'');
+      if(idx.time<0&&(s.indexOf('交易时间')>=0||s.indexOf('交易日期')>=0))idx.time=k;
+      else if(idx.kind<0&&(s.indexOf('收/支')>=0||s.indexOf('收支')>=0))idx.kind=k;
+      else if(idx.amt<0&&s.indexOf('金额')>=0)idx.amt=k;
+      else if(idx.peer<0&&s.indexOf('交易对方')>=0)idx.peer=k;
+      else if(idx.goods<0&&s.indexOf('商品')>=0)idx.goods=k;
+      else if(idx.tcat<0&&s.indexOf('交易分类')>=0)idx.tcat=k;
+      else if(idx.note<0&&s.indexOf('备注')>=0)idx.note=k;
+      else if(idx.pay<0&&(s.indexOf('支付方式')>=0||s.indexOf('付款方式')>=0))idx.pay=k;
+      else if(idx.status<0&&(s.indexOf('当前状态')>=0||s.indexOf('交易状态')>=0||s==='状态'))idx.status=k;
+    });
+  }
+  // 表头认不出来（或列不全）时，按内容猜列
+  if(idx.time<0||idx.amt<0||idx.kind<0){
+    var d=detectCols(rows,hi+1);
+    if(!d)return null;
+    idx.time=d.time;idx.amt=d.amt;idx.kind=d.kind;
+    if(idx.peer<0)idx.peer=d.peer;
+    if(idx.pay<0)idx.pay=d.pay;
+    if(idx.status<0)idx.status=d.status;
+    if(hi<0)hi=d.start-1;
+  }
+  var out=[],dup=0,skip=0,seen={},exist={};
   S.tx.forEach(function(t){exist[t.date+'|'+t.amount.toFixed(2)+'|'+t.type+'|'+((t.note||'').slice(0,24))]=1;});
-  for(var k=hi+1;k<lines.length;k++){
-    var ln=lines[k];
-    if(!ln||ln.indexOf(',')<0)continue;
-    var cc=parseCSVLine(ln);
-    // 金额里带千分位逗号（¥1,299.00）又没加引号时，会被拆成多列 —— 这里把它拼回去
-    if(idx.amt>=0&&cc.length>cells.length){
+  for(var k=hi+1;k<rows.length;k++){
+    var cc=(rows[k]||[]).slice();
+    if(!cc.length||!cc.join('').replace(/[\s,"]/g,''))continue;
+    if(idx.amt>=0&&cells&&cc.length>cells.length){
       var extra=cc.length-cells.length;
       cc=cc.slice(0,idx.amt).concat([cc.slice(idx.amt,idx.amt+extra+1).join(',')],cc.slice(idx.amt+extra+1));
     }
-    var time=(cc[idx.time]||'').trim();
+    var time=String(cc[idx.time]===undefined?'':cc[idx.time]).trim();
     if(/^\d{5}(\.\d+)?$/.test(time))time=excelDate(time);
     var m=time.match(/(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
     if(!m){skip++;continue;}
     var pad=function(n){return ('0'+n).slice(-2);};
     var date=m[1]+'-'+pad(m[2])+'-'+pad(m[3]);
-    var kind=(cc[idx.kind]||'').trim();
+    var kind=String(cc[idx.kind]===undefined?'':cc[idx.kind]).trim();
     var type=kind.indexOf('收入')>=0?'income':(kind.indexOf('支出')>=0?'expense':'');
     if(!type){skip++;continue;}
-    var amount=parseFloat((cc[idx.amt]||'').replace(/[¥￥,\s]/g,''));
+    var amount=parseFloat(String(cc[idx.amt]===undefined?'':cc[idx.amt]).replace(/[¥￥,\s]/g,''));
     if(!(amount>0)){skip++;continue;}
-    // 退款/关闭/失败的支出行不算真花出去的（微信「已全额退款」、支付宝「交易关闭」）
-    var status=idx.status>=0?((cc[idx.status]||'').trim()):'';
+    var status=idx.status>=0?String(cc[idx.status]||'').trim():'';
     if(type==='expense'&&/退款|关闭|失败|撤销/.test(status)){skip++;continue;}
-    var peer=(idx.peer>=0?(cc[idx.peer]||''):'').trim();
-    var goods=(idx.goods>=0?(cc[idx.goods]||''):'').trim();
-    var tcat=(idx.tcat>=0?(cc[idx.tcat]||''):'').trim();
-    var clean=function(s){s=(s||'').trim();return (s==='/'||s==='-'||s==='—')?'':s;};
+    var peer=idx.peer>=0?String(cc[idx.peer]||''):'';
+    var goods=idx.goods>=0?String(cc[idx.goods]||''):'';
+    var tcat=idx.tcat>=0?String(cc[idx.tcat]||''):'';
+    var clean=function(s){s=String(s||'').trim();return (s==='/'||s==='-'||s==='—'||s==='\\')?'':s;};
     peer=clean(peer);goods=clean(goods);
     var note=((goods||peer||'')).replace(/\s+/g,' ').slice(0,24);
     if(!note)note=tcat||'账单导入';
     var cat=guessCat(tcat+' '+peer+' '+goods+' '+note,type);
-    var pay=idx.pay>=0?clean(cc[idx.pay]||''):'';
+    var pay=idx.pay>=0?clean(cc[idx.pay]):'';
     var acc=inferAcc(src,pay);
     var key=date+'|'+amount.toFixed(2)+'|'+type+'|'+note;
     if(exist[key]||seen[key]){dup++;continue;}
     seen[key]=1;
-    rows.push({id:uid(),type:type,amount:+amount.toFixed(2),cat:cat,note:note,date:date,acc:acc,recId:null});
+    out.push({id:uid(),type:type,amount:+amount.toFixed(2),cat:cat,note:note,date:date,acc:acc,recId:null});
   }
-  return {rows:rows,dup:dup,skip:skip};
+  return {rows:out,dup:dup,skip:skip};
 }
+function detectCols(rows,from){
+  from=from||0;
+  var best=null;
+  var sample=rows.slice(from,from+40);
+  var width=0;
+  sample.forEach(function(r){if(r&&r.length>width)width=r.length;});
+  if(!width)return null;
+  for(var c=0;c<width;c++){
+    var dateN=0,amtN=0,kindN=0,payN=0,stN=0;
+    sample.forEach(function(r){
+      var v=r&&r[c]!==undefined?String(r[c]).trim():'';
+      if(!v)return;
+      if(/^\d{4}[-\/]\d{1,2}[-\/]\d{1,2}/.test(v)||/^\d{5}(\.\d+)?$/.test(v))dateN++;
+      if(/^[¥￥]?-?[\d,]+(\.\d{1,2})?$/.test(v))amtN++;
+      if(/^(收入|支出|不计收支|收\/支)$/.test(v)||/收入|支出/.test(v)&&v.length<8)kindN++;
+      if(/零钱|银行|花呗|余额|支付方式/.test(v))payN++;
+      if(/成功|退款|关闭|完成|已全额/.test(v))stN++;
+    });
+    var score=dateN*3+amtN+kindN*2;
+    if(!best||score>best.score)best={score:score,time:c};
+  }
+  if(!best||best.score<6)return null;
+  var timeCol=best.time,amt=-1,kind=-1,pay=-1,status=-1,peer=-1;
+  var n=sample.length||1;
+  for(var c2=0;c2<width;c2++){
+    if(c2===timeCol)continue;
+    var d=0,k=0,p=0,s=0;
+    sample.forEach(function(r){
+      var v=r&&r[c2]!==undefined?String(r[c2]).trim():'';
+      if(!v)return;
+      if(/^(收入|支出|不计收支)$/.test(v)||/^(收入|支出)$/.test(v))k++;
+      if(/^[¥￥]?-?[\d,]+(\.\d{1,2})?$/.test(v))d++;
+      if(/零钱|银行|花呗|余额|信用卡|储蓄卡/.test(v))p++;
+      if(/成功|退款|关闭|已全额|已完成/.test(v))s++;
+    });
+    if(kind<0&&k>=Math.max(1,n*0.3))kind=c2;
+    else if(d>0&&amt<0&&k<n*0.3)amt=c2;
+    if(pay<0&&p>=Math.max(1,n*0.3))pay=c2;
+    if(status<0&&s>=Math.max(1,n*0.5))status=c2;
+  }
+  if(amt<0||kind<0)return null;
+  var bestPeer=-1,bestScore=0;
+  for(var c3=0;c3<width;c3++){
+    if([timeCol,amt,kind,pay,status].indexOf(c3)>=0)continue;
+    var seenv={},distinct=0,lenSum=0,cntv=0;
+    sample.forEach(function(r){
+      var v=r&&r[c3]!==undefined?String(r[c3]).trim():'';
+      if(!v||v==='/'||v==='-'||v==='—')return;
+      if(v.length<2||v.length>40)return;
+      cntv++;lenSum+=v.length;
+      if(!seenv[v]){seenv[v]=1;distinct++;}
+    });
+    if(cntv<Math.max(1,sample.length*0.5))continue;
+    var score=distinct*10+lenSum/Math.max(cntv,1);
+    if(score>bestScore){bestScore=score;bestPeer=c3;}
+  }
+  peer=bestPeer;
+  return {time:timeCol,amt:amt,kind:kind,pay:pay,status:status,peer:peer,start:from};
+}
+
 function inferAcc(src,pay){
   var names=accNames();
   var pick=function(n){return names.indexOf(n)>=0?n:'';};
@@ -1854,6 +2054,24 @@ function doImportBill(){
   ui.pendingBill=null;
   save();closeSheet();render();toast('已导入 '+p.rows.length+' 笔');
 }
+function billFailHTML(txt,label){
+  var lines=(txt||'').split(/\r?\n/).filter(function(l){return l.trim();}).slice(0,4);
+  return '<h3 class="sh-title">没认出这张表</h3>'
+    +'<p class="sh-sub">文件：'+esc(label||'')+'</p>'
+    +'<div class="dbg">'+lines.map(function(l,k){
+        return '<div class="dgl"><b>第 '+(k+1)+' 行</b><br>'+esc((l||'').slice(0,160))+'</div>';
+      }).join('')+'</div>'
+    +'<p class="sh-sub" style="margin-top:12px">青钱要找表头里的「交易时间」「金额」「收/支」这几列。把上面这张截图发我，我按你的表格格式改。</p>'
+    +'<button class="btn ghost" data-act="close">知道了</button>';
+}
+function billErrHTML(e,label){
+  return '<h3 class="sh-title">这个文件打不开</h3>'
+    +'<p class="sh-sub">文件：'+esc(label||'')+'</p>'
+    +'<div class="dbg"><div class="dgl"><b>报错</b><br>'+esc((e&&e.message)||String(e))+'</div></div>'
+    +'<p class="sh-sub" style="margin-top:12px">最稳的办法：在电脑上用 Excel / WPS 打开它，「另存为」CSV，再导那个 CSV。'
+    +'<br>或者把这个 xlsx 发我，我直接适配。</p>'
+    +'<button class="btn ghost" data-act="close">知道了</button>';
+}
 function handleBillFile(file){
   if(!file)return;
   if(/\.(zip|rar|7z)$/i.test(file.name||'')){toast('这是压缩包，请先解压出里面的表格再选');return;}
@@ -1861,7 +2079,7 @@ function handleBillFile(file){
   var useTxt=function(txt){
     try{
       var p=parseBill(txt);
-      if(!p){toast('没认出这个表格，请用微信/支付宝导出的文件');return;}
+      if(!p){openSheet(billFailHTML(txt,name));return;}
       if(!p.rows.length){
         toast(p.dup?'这 '+p.dup+' 笔都记过了':'没有可导入的收支记录');
         return;
@@ -1875,8 +2093,13 @@ function handleBillFile(file){
     var buf=r.result;
     if(/\.xlsx$/i.test(name)){
       toast('正在读表格…');
-      xlsxRows(buf).then(function(rows){useTxt(rowsToCsv(rows));})
-        .catch(function(e){toast('读不了这个 Excel：'+e.message);});
+      xlsxRows(buf).then(function(rows){
+        var p=parseRows(rows,'');
+        if(!p){openSheet(billFailHTML(rowsToCsv(rows).split('\n').slice(0,4).join('\n'),name));return;}
+        if(!p.rows.length){toast(p.dup?'这 '+p.dup+' 笔都记过了':'没有可导入的收支记录');return;}
+        ui.pendingBill=p;openSheet(billPreviewHTML(p));
+      })
+        .catch(function(e){openSheet(billErrHTML(e,name));});
       return;
     }
     if(/\.xls$/i.test(name)){toast('这是旧版 .xls，请用 Excel 另存为 .xlsx 或 CSV');return;}
